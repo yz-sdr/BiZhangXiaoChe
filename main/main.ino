@@ -1,75 +1,213 @@
-#include <NewPing>
-#include <Servo>
+#include <NewPing.h>
 
-// sonar
-const uint8_t TRIG_PIN = ;
-const uint8_t ECHO_PIN = ;
-const uint8_t MAX_CM = ;
-NewPing sonar(TRIG_PIN, ECHO_PIN, MAX_CM);
+// =========================
+// 超声波引脚
+// =========================
+const uint8_t L_TRIG_PIN = 8;
+const uint8_t L_ECHO_PIN = 9;
+const uint8_t R_TRIG_PIN = 10;
+const uint8_t R_ECHO_PIN = 11;
 
-inline uint16_t pingOnceCm() {
+const uint16_t MAX_CM = 200;
+
+NewPing sonarL(L_TRIG_PIN, L_ECHO_PIN, MAX_CM);
+NewPing sonarR(R_TRIG_PIN, R_ECHO_PIN, MAX_CM);
+
+// =========================
+// 板载电机驱动引脚（UNO-C）
+// A组=左轮，B组=右轮
+// =========================
+const uint8_t A_DIR_PIN = 7;
+const uint8_t A_PWM_PIN = 6;
+const uint8_t B_DIR_PIN = 4;
+const uint8_t B_PWM_PIN = 5;
+
+// 如果方向不对，只改这里
+const int8_t LEFT_DIR_SIGN  = 1;
+const int8_t RIGHT_DIR_SIGN = -1;
+
+// =========================
+// 参数
+// =========================
+const int16_t FORWARD_SPEED    = 255;   // 原来255，先降一点更稳
+const int16_t SOFT_TURN_DELTA  = 110;
+const int16_t BOTH_TURN_DELTA  = 150;
+const int16_t HARD_TURN_INNER  = 0;     // 不再倒车，急转时内侧轮停转
+
+const uint16_t HARD_TURN_CM = 15;       // 原来15，提前一点开始急转
+const uint16_t CAUTION_CM   = 23;       // 原来23，提前一点开始修正
+const uint16_t DIFF_CM      = 8;
+
+const uint16_t SENSOR_MS       = 20;    // 更快刷新
+const uint16_t HARD_TURN_HOLD  = 140;   // 急转锁定时间，防止墙角抖动
+
+// =========================
+// 全局变量
+// =========================
+uint16_t leftCm  = MAX_CM;
+uint16_t rightCm = MAX_CM;
+uint32_t lastSenseMs = 0;
+int8_t lastTurnDir = 1;   // 1=右转, -1=左转
+
+bool hardTurning = false;
+int8_t hardTurnDir = 1;   // 1=右转, -1=左转
+uint32_t hardTurnUntil = 0;
+
+// =========================
+// 超声波函数
+// =========================
+uint16_t pingOnceCm(NewPing &sonar) {
   uint16_t d = sonar.ping_cm();
-  return d == 0 ? MAX_CM : d;
+  return (d == 0) ? MAX_CM : d;
 }
 
-// servo
-Servo servo;
-const uint8_t SERVO_PIN = ;
-const uint8_t L_ANG = 150;
-const uint8_t M_ANG = 90;
-const uint8_t R_ANG = 30;
+void readSensors() {
+  leftCm = pingOnceCm(sonarL);
+  delay(6);
+  rightCm = pingOnceCm(sonarR);
+}
+
+// =========================
+// 电机控制
+// speedVal: -255 ~ 255
+// 正数前进，负数后退
+// =========================
+void driveMotor(uint8_t dirPin, uint8_t pwmPin, int16_t speedVal) {
+  speedVal = constrain(speedVal, -255, 255);
+
+  if (speedVal > 0) {
+    digitalWrite(dirPin, HIGH);
+    analogWrite(pwmPin, speedVal);
+  } else if (speedVal < 0) {
+    digitalWrite(dirPin, LOW);
+    analogWrite(pwmPin, -speedVal);
+  } else {
+    analogWrite(pwmPin, 0);
+  }
+}
 
 void drive(int16_t left, int16_t right) {
-  TODO:
+  left  *= LEFT_DIR_SIGN;
+  right *= RIGHT_DIR_SIGN;
+
+  driveMotor(A_DIR_PIN, A_PWM_PIN, left);
+  driveMotor(B_DIR_PIN, B_PWM_PIN, right);
 }
 
 void stopCar() {
   drive(0, 0);
 }
 
-// state machine
-enum State : uint8_t {
-  ST_FORWARD,
-  ST_BACK,
-  ST_SCAN_TO_LEFT,
-  ST_SCAN_MEASURE_LEFT,
-  ST_SCAN_TO_RIGHT,
-  ST_SCAN_MEASURE_RIGHT,
-  ST_RETURN_CENTER,
-  ST_TURN
+void startHardTurn(int8_t dir, uint32_t now) {
+  hardTurning = true;
+  hardTurnDir = dir;
+  hardTurnUntil = now + HARD_TURN_HOLD;
+  lastTurnDir = dir;
 }
 
-State state = ST_FORWARD;
-
-uint16_t frontCm = MAX_CM;
-uint16_t leftCm = MAX_CM;
-uint16_t rightCm = MAX_CM;
-
-uint16_t scanAverageCm(uint8_t samples) {
-  uint32_t sum = 0;
-
-  for(int i = 0; i < samples; i++) {
-    sum += pingOnceCm();
-    delay(15);
+void applyHardTurn() {
+  if (hardTurnDir > 0) {
+    // 右转：左轮前进，右轮停
+    drive(FORWARD_SPEED, HARD_TURN_INNER);
+  } else {
+    // 左转：左轮停，右轮前进
+    drive(HARD_TURN_INNER, FORWARD_SPEED);
   }
-
-  return (uint16_t)(sum / samples);
 }
 
+// =========================
+// 主程序
+// =========================
 void setup() {
-  servo.attach(SERVO_PIN);
-  servo.write(M_ANG);
-  frontCm = MAX_CM;
+  pinMode(A_DIR_PIN, OUTPUT);
+  pinMode(A_PWM_PIN, OUTPUT);
+  pinMode(B_DIR_PIN, OUTPUT);
+  pinMode(B_PWM_PIN, OUTPUT);
+
+  stopCar();
+
+  Serial.begin(9600);
+  delay(200);
+
+  readSensors();
+  lastSenseMs = millis();
 }
 
 void loop() {
-  uint32_t time = millis();
-  // if(state == ST_FORWARD) 
+  uint32_t now = millis();
 
-  switch (state) {
-    case ST_FORWARD: {
-      
+  if (now - lastSenseMs < SENSOR_MS) return;
+  lastSenseMs = now;
+
+  readSensors();
+
+  Serial.print("L=");
+  Serial.print(leftCm);
+  Serial.print("cm, R=");
+  Serial.print(rightCm);
+  Serial.println("cm");
+
+  int diff = (int)leftCm - (int)rightCm;
+
+  // 如果正在急转，先保持一小段时间，不要立刻改判
+  if (hardTurning) {
+    if (now < hardTurnUntil) {
+      applyHardTurn();
+      return;
+    } else {
+      hardTurning = false;
     }
-    // case ...
+  }
+
+  // 1. 两边都很近：前方大概率是墙，强制选一个方向持续急转
+  if (leftCm <= HARD_TURN_CM && rightCm <= HARD_TURN_CM) {
+    if (diff < -DIFF_CM) {
+      startHardTurn(1, now);   // 右转
+    } else if (diff > DIFF_CM) {
+      startHardTurn(-1, now);  // 左转
+    } else {
+      startHardTurn(lastTurnDir, now);  // 差不多时沿用上次方向
+    }
+    applyHardTurn();
+  }
+
+  // 2. 左边非常近：强力向右
+  else if (leftCm <= HARD_TURN_CM) {
+    startHardTurn(1, now);
+    applyHardTurn();
+  }
+
+  // 3. 右边非常近：强力向左
+  else if (rightCm <= HARD_TURN_CM) {
+    startHardTurn(-1, now);
+    applyHardTurn();
+  }
+
+  // 4. 左边较近：轻微向右修正
+  else if (leftCm <= CAUTION_CM && rightCm > CAUTION_CM) {
+    drive(FORWARD_SPEED, FORWARD_SPEED - SOFT_TURN_DELTA);
+    lastTurnDir = 1;
+  }
+
+  // 5. 右边较近：轻微向左修正
+  else if (rightCm <= CAUTION_CM && leftCm > CAUTION_CM) {
+    drive(FORWARD_SPEED - SOFT_TURN_DELTA, FORWARD_SPEED);
+    lastTurnDir = -1;
+  }
+
+  // 6. 两边都较近：按更空的一边修正，但不倒车
+  else if (leftCm <= CAUTION_CM && rightCm <= CAUTION_CM) {
+    if (diff < 0) {
+      drive(FORWARD_SPEED, FORWARD_SPEED - BOTH_TURN_DELTA);
+      lastTurnDir = 1;
+    } else {
+      drive(FORWARD_SPEED - BOTH_TURN_DELTA, FORWARD_SPEED);
+      lastTurnDir = -1;
+    }
+  }
+
+  // 7. 通畅：直行
+  else {
+    drive(FORWARD_SPEED, FORWARD_SPEED);
   }
 }
