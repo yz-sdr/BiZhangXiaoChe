@@ -48,6 +48,7 @@ uint16_t leftCm  = MAX_CM;
 uint16_t rightCm = MAX_CM;
 uint32_t lastSenseMs = 0;
 int8_t lastTurnDir = 1;   // 1=右转, -1=左转
+int8_t preferredTurnDir = -1;   // -1=左转, 1=右转
 
 bool hardTurning = false;
 int8_t hardTurnDir = 1;   // 1=右转, -1=左转
@@ -66,6 +67,16 @@ void readSensors() {
   delay(6);
   rightCm = pingOnceCm(sonarR);
 }
+
+void updatePreferredTurnDir() {
+  // 用一个很小的门槛，尽量早点记住开口方向
+  if (leftCm > rightCm + 2) {
+    preferredTurnDir = -1;   // 左边更空 -> 以后优先左转
+  } else if (rightCm > leftCm + 2) {
+    preferredTurnDir = 1;    // 右边更空 -> 以后优先右转
+  }
+}
+
 
 // =========================
 // 电机控制
@@ -140,6 +151,7 @@ void loop() {
   lastSenseMs = now;
 
   readSensors();
+  updatePreferredTurnDir();
 
   Serial.print("L=");
   Serial.print(leftCm);
@@ -151,7 +163,15 @@ void loop() {
 
   // 如果正在急转，先保持一小段时间，不要立刻改判
   if (hardTurning) {
-    if (now < hardTurnUntil) {
+    // 正在右转，但左边突然明显更空 -> 说明转错了，取消锁定
+    if (hardTurnDir > 0 && leftCm > rightCm + DIFF_CM + 2) {
+      hardTurning = false;
+    }
+    // 正在左转，但右边突然明显更空 -> 说明转错了，取消锁定
+    else if (hardTurnDir < 0 && rightCm > leftCm + DIFF_CM + 2) {
+      hardTurning = false;
+    }
+    else if (now < hardTurnUntil) {
       applyHardTurn();
       return;
     } else {
@@ -159,15 +179,19 @@ void loop() {
     }
   }
 
+
   // 1. 两边都很近：前方大概率是墙，强制选一个方向持续急转
   if (leftCm <= HARD_TURN_CM && rightCm <= HARD_TURN_CM) {
     if (diff < -DIFF_CM) {
       startHardTurn(1, now);   // 右转
     } else if (diff > DIFF_CM) {
       startHardTurn(-1, now);  // 左转
-    } else {
-      startHardTurn(lastTurnDir, now);  // 差不多时沿用上次方向
-    }
+    } 
+      else {
+        startHardTurn(preferredTurnDir, now);  // 差不多时，转向最近观察到更空的一边
+      }
+  // 差不多时沿用上次方向
+    
     applyHardTurn();
   }
 
