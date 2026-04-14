@@ -35,7 +35,7 @@ const int16_t BOTH_TURN_DELTA  = 150;
 const int16_t HARD_TURN_INNER  = 0;     // 不再倒车，急转时内侧轮停转
 
 const uint16_t HARD_TURN_CM = 15;       // 原来15，提前一点开始急转
-const uint16_t CAUTION_CM   = 23;       // 原来23，提前一点开始修正
+const uint16_t CAUTION_CM   = 26;       // 原来23，提前一点开始修正
 const uint16_t DIFF_CM      = 8;
 
 const uint16_t SENSOR_MS       = 20;    // 更快刷新
@@ -48,7 +48,10 @@ uint16_t leftCm  = MAX_CM;
 uint16_t rightCm = MAX_CM;
 uint32_t lastSenseMs = 0;
 int8_t lastTurnDir = 1;   // 1=右转, -1=左转
-int8_t preferredTurnDir = -1;   // -1=左转, 1=右转
+
+
+bool cornerLocked = false;   // 这次拐弯方向是否已锁定
+int8_t cornerDir = 0;        // -1=左转, 1=右转
 
 bool hardTurning = false;
 int8_t hardTurnDir = 1;   // 1=右转, -1=左转
@@ -67,7 +70,7 @@ void readSensors() {
   delay(6);
   rightCm = pingOnceCm(sonarR);
 }
-
+/*
 void updatePreferredTurnDir() {
   // 用一个很小的门槛，尽量早点记住开口方向
   if (leftCm > rightCm + 2) {
@@ -76,6 +79,28 @@ void updatePreferredTurnDir() {
     preferredTurnDir = 1;    // 右边更空 -> 以后优先右转
   }
 }
+*/
+
+void updateCornerLock() {
+  // 只有还没锁定时，才允许决定这次拐弯方向
+  if (!cornerLocked && !hardTurning && (leftCm <= CAUTION_CM || rightCm <= CAUTION_CM)) {
+    if (leftCm > rightCm + DIFF_CM) {
+      cornerDir = -1;      // 左边更空 -> 锁定左转
+      cornerLocked = true;
+    } 
+    else if (rightCm > leftCm + DIFF_CM) {
+      cornerDir = 1;       // 右边更空 -> 锁定右转
+      cornerLocked = true;
+    }
+  }
+
+  // 回到比较开阔时，才允许为下一个弯重新判断
+  if (!hardTurning && leftCm > CAUTION_CM + 8 && rightCm > CAUTION_CM + 8) {
+    cornerLocked = false;
+    cornerDir = 0;
+  }
+}
+
 
 
 // =========================
@@ -114,7 +139,11 @@ void startHardTurn(int8_t dir, uint32_t now) {
   hardTurnDir = dir;
   hardTurnUntil = now + HARD_TURN_HOLD;
   lastTurnDir = dir;
+
+  cornerLocked = false;
+  cornerDir = 0;
 }
+
 
 void applyHardTurn() {
   if (hardTurnDir > 0) {
@@ -151,7 +180,9 @@ void loop() {
   lastSenseMs = now;
 
   readSensors();
-  updatePreferredTurnDir();
+  // updatePreferredTurnDir();
+
+  updateCornerLock();
 
   Serial.print("L=");
   Serial.print(leftCm);
@@ -182,28 +213,38 @@ void loop() {
 
   // 1. 两边都很近：前方大概率是墙，强制选一个方向持续急转
   if (leftCm <= HARD_TURN_CM && rightCm <= HARD_TURN_CM) {
-    if (diff < -DIFF_CM) {
-      startHardTurn(1, now);   // 右转
-    } else if (diff > DIFF_CM) {
-      startHardTurn(-1, now);  // 左转
+    if (cornerLocked && cornerDir != 0) {
+      startHardTurn(cornerDir, now);    // 优先使用提前锁定的方向
     } 
-      else {
-        startHardTurn(preferredTurnDir, now);  // 差不多时，转向最近观察到更空的一边
-      }
-  // 差不多时沿用上次方向
-    
+    else if (diff < -DIFF_CM) {
+      startHardTurn(1, now);            // 右转
+    } 
+    else if (diff > DIFF_CM) {
+      startHardTurn(-1, now);           // 左转
+    } 
+    else {
+      startHardTurn(lastTurnDir, now);  // 最后兜底
+    }
     applyHardTurn();
   }
+
 
   // 2. 左边非常近：强力向右
   else if (leftCm <= HARD_TURN_CM) {
-    startHardTurn(1, now);
+    if (cornerLocked && cornerDir != 0) {
+      startHardTurn(cornerDir, now);
+    } else {
+      startHardTurn(1, now);
+    }
     applyHardTurn();
   }
 
-  // 3. 右边非常近：强力向左
   else if (rightCm <= HARD_TURN_CM) {
-    startHardTurn(-1, now);
+    if (cornerLocked && cornerDir != 0) {
+      startHardTurn(cornerDir, now);
+    } else {
+      startHardTurn(-1, now);
+    }
     applyHardTurn();
   }
 
@@ -221,10 +262,20 @@ void loop() {
 
   // 6. 两边都较近：按更空的一边修正，但不倒车
   else if (leftCm <= CAUTION_CM && rightCm <= CAUTION_CM) {
-    if (diff < 0) {
+    if (cornerLocked && cornerDir != 0) {
+      if (cornerDir < 0) {
+        drive(FORWARD_SPEED - BOTH_TURN_DELTA, FORWARD_SPEED); // 左转预备
+        lastTurnDir = -1;
+      } else {
+        drive(FORWARD_SPEED, FORWARD_SPEED - BOTH_TURN_DELTA); // 右转预备
+        lastTurnDir = 1;
+      }
+    } 
+    else if (diff < 0) {
       drive(FORWARD_SPEED, FORWARD_SPEED - BOTH_TURN_DELTA);
       lastTurnDir = 1;
-    } else {
+    } 
+    else {
       drive(FORWARD_SPEED - BOTH_TURN_DELTA, FORWARD_SPEED);
       lastTurnDir = -1;
     }
